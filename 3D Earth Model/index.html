@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>지구 3D 모델</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="stage" aria-label="지구 3D 화면">
+      <canvas id="gl-canvas" aria-label="고도로 지형을 표현하고 자전하며 태양빛을 받는 지구"></canvas>
+      <p class="hint">드래그로 돌려 보기 · 휠로 확대·축소</p>
+      <p id="loading" class="stage-msg">고도 자료를 만드는 중…</p>
+      <p id="stage-error" class="stage-msg" hidden>이 브라우저에서는 WebGL을 사용할 수 없습니다.</p>
+      <dl class="readout">
+        <div><dt>UTC</dt><dd id="r-time"></dd></div>
+        <div><dt>태양 적위</dt><dd id="r-decl"></dd></div>
+        <div><dt>정오인 경도</dt><dd id="r-noon"></dd></div>
+        <div><dt>북반구</dt><dd id="r-season"></dd></div>
+      </dl>
+    </section>
+
+    <aside class="panel">
+      <h1>지구 3D 모델</h1>
+
+      <section aria-labelledby="h-time">
+        <h2 id="h-time">회전 운동 (자전·공전)</h2>
+        <div class="row">
+          <button id="play-btn" type="button" class="primary">일시정지</button>
+          <button id="now-btn" type="button">지금 시각</button>
+        </div>
+        <label>재생 속도
+          <select id="speed">
+            <option value="60">1초에 1분</option>
+            <option value="600">1초에 10분</option>
+            <option value="3600" selected>1초에 1시간 (하루 = 24초)</option>
+            <option value="21600">1초에 6시간</option>
+            <option value="86400">1초에 하루</option>
+            <option value="604800">1초에 1주 (계절 변화)</option>
+          </select>
+        </label>
+        <div class="grid2">
+          <label>날짜 (UTC)<input id="date" type="date"></label>
+          <label>시각 (UTC) <output id="hour-out"></output><input id="hour" type="range" min="0" max="1439" step="1"></label>
+        </div>
+      </section>
+
+      <section aria-labelledby="h-light">
+        <h2 id="h-light">조명 (Phong 반사 모델)</h2>
+        <label class="check"><input id="use-diffuse" type="checkbox" checked> 확산광: 태양을 향한 면이 밝음 (낮과 밤)</label>
+        <label class="check"><input id="use-specular" type="checkbox" checked> 정반사광: 바다에 비친 햇빛</label>
+        <label>주변광 세기 <output id="ambient-out"></output><input id="ambient" type="range" min="0" max="0.5" step="0.01" value="0.1"></label>
+      </section>
+
+      <section aria-labelledby="h-terrain">
+        <h2 id="h-terrain">지형 (고도)</h2>
+        <label>고도 과장 배율 <output id="exag-out"></output><input id="exag" type="range" min="1" max="100" step="1" value="20"></label>
+        <p class="note" id="exag-note"></p>
+        <label class="check"><input id="grid" type="checkbox"> 위·경도선(30° 간격) 표시</label>
+        <fieldset>
+          <legend>고도 자료</legend>
+          <label class="check"><input type="radio" name="source" value="built" checked> 위·경도 좌표로 작성한 자료 (기본)</label>
+          <label class="check"><input type="radio" name="source" value="image"> 공개 고도 이미지 불러오기</label>
+          <div id="image-fields" class="image-fields" hidden>
+            <input id="height-file" type="file" accept="image/*" aria-label="고도 이미지 파일">
+            <label>흰색(255)의 높이 (m)<input id="height-max" type="number" min="100" max="20000" value="8848"></label>
+            <p class="note">등장방형(가로:세로 = 2:1) 흑백 이미지. 검정(0)은 바다로, 나머지는 밝기에 비례한 높이로 읽습니다.</p>
+          </div>
+        </fieldset>
+        <p id="source-error" class="error" role="alert"></p>
+        <div class="legend" aria-label="고도 색 범례">
+          <span class="bar ocean"></span><span class="bar land"></span>
+          <div class="ticks"><span>-4.7 km</span><span>해수면</span><span>5.8 km 이상</span></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <script id="vertex-shader" type="x-shader/x-vertex">
+    attribute vec3 vPosition;
+    attribute vec3 vNormal;
+    attribute vec2 vTexCoord;
+    attribute float vWater;
+    uniform mat4 modelViewMatrix;
+    uniform mat4 projectionMatrix;
+    varying vec3 fNormal;
+    varying vec3 fPos;
+    varying vec2 fTexCoord;
+    varying float fWater;
+
+    void main() {
+      vec4 p = modelViewMatrix * vec4(vPosition, 1.0);
+      fPos = p.xyz;
+      fNormal = (modelViewMatrix * vec4(vNormal, 0.0)).xyz;
+      fTexCoord = vTexCoord;
+      fWater = vWater;
+      gl_Position = projectionMatrix * p;
+    }
+  </script>
+
+  <script id="fragment-shader" type="x-shader/x-fragment">
+    precision mediump float;
+    uniform sampler2D texture;
+    uniform vec3 sunDir;
+    uniform float ambient;
+    uniform float useDiffuse;
+    uniform float useSpecular;
+    varying vec3 fNormal;
+    varying vec3 fPos;
+    varying vec2 fTexCoord;
+    varying float fWater;
+
+    void main() {
+      vec3 N = normalize(fNormal);
+      vec3 L = normalize(sunDir);
+      vec3 E = normalize(-fPos);
+      vec3 H = normalize(L + E);
+      float d = max(dot(N, L), 0.0);
+      float s = d > 0.0 ? pow(max(dot(N, H), 0.0), 80.0) * fWater : 0.0;
+      vec3 base = texture2D(texture, fTexCoord).rgb;
+      vec3 color = base * (ambient + useDiffuse * d) + useSpecular * 0.8 * s * vec3(1.0, 0.95, 0.85);
+      gl_FragColor = vec4(color, 1.0);
+    }
+  </script>
+
+  <script src="js/mv.js"></script>
+  <script src="js/geo.js"></script>
+  <script src="js/earth.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
